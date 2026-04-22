@@ -6,7 +6,16 @@
       "Read(//tmp/**)",
       "PowerShell(node --version)",
       "PowerShell(npm --version)",
-      "PowerShell(npm install --cache C:\\\\Temp\\\\npm-cache 2>&1)"
+      "PowerShell(npm install --cache C:\\\\Temp\\\\npm-cache 2>&1)",
+      "PowerShell(gh repo create taaljacht-markeren-kleuren --public --description \"Taal Jacht Groep 5 Blok 7 - Interactieve markeer en kleur opdrachten\" 2>&1)",
+      "mcp__13f65052-9e86-42a9-8457-d88dc4dde0e7__list_projects",
+      "mcp__13f65052-9e86-42a9-8457-d88dc4dde0e7__get_project_url",
+      "mcp__13f65052-9e86-42a9-8457-d88dc4dde0e7__get_publishable_keys",
+      "mcp__13f65052-9e86-42a9-8457-d88dc4dde0e7__apply_migration",
+      "mcp__Claude_Preview__preview_start",
+      "Bash(npm install *)",
+      "Bash(npm run *)",
+      "Bash(echo \"EXIT=$?\")"
     ]
   }
 }

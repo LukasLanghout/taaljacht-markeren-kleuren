@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import Groq from "groq-sdk";
-import { supabase } from "@/lib/supabase";
+import { getSupabase } from "@/lib/supabase";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -17,8 +17,8 @@ Voorbeelden van zulke opdrachten:
 Geef het resultaat als een JSON array. Geen uitleg, geen markdown, ALLEEN geldige JSON.
 `;
 
-const GEBRUIKER_PROMPT = (tekst: string) => `
-Hier is de tekst uit het PDF-bestand (Taal Jacht, Groep 5, Blok 7):
+const GEBRUIKER_PROMPT = (tekst: string, bestandsnaam: string) => `
+Hier is de tekst uit het PDF-bestand "${bestandsnaam}":
 
 ${tekst}
 
@@ -33,16 +33,6 @@ Geef een JSON array met opdrachten in precies dit formaat:
       {"id": "z1", "tekst": "Tweede zin..."}
     ],
     "kleuren": ["geel", "blauw", "groen"]
-  },
-  {
-    "les": "Les 6",
-    "type": "markeer",
-    "instructie": "Markeer het antwoord in de brief van oma.",
-    "zinnen": [
-      {"id": "f0", "tekst": "Eerste zin van de brief."},
-      {"id": "f1", "tekst": "Tweede zin..."}
-    ],
-    "kleuren": []
   }
 ]
 
@@ -56,43 +46,28 @@ Regels:
 
 export async function POST(req: NextRequest) {
   try {
-    const formData = await req.formData();
-    const file = formData.get("pdf") as File | null;
-
-    if (!file || file.type !== "application/pdf") {
-      return NextResponse.json(
-        { error: "Geen geldig PDF-bestand ontvangen." },
-        { status: 400 }
-      );
-    }
-
-    // ── Stap 1: PDF-tekst extraheren ────────────────────────────────────────
-    const buffer = Buffer.from(await file.arrayBuffer());
-
-    // Dynamische import om Next.js ESM-conflict te vermijden
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const pdfParse = require("pdf-parse");
-    const pdfData = await pdfParse(buffer);
-    const tekst: string = pdfData.text;
+    const body = await req.json();
+    const tekst: string = body.tekst ?? "";
+    const bestandsnaam: string = body.bestandsnaam ?? "onbekend.pdf";
 
     if (!tekst || tekst.trim().length < 50) {
       return NextResponse.json(
-        { error: "PDF-tekst kon niet worden gelezen. Probeer een andere PDF." },
+        { error: "Te weinig tekst om te verwerken." },
         { status: 422 }
       );
     }
 
-    // Stuur max 10.000 tekens naar Groq (meer past niet goed in één prompt)
+    // Max 10.000 tekens voor Groq
     const tekst_gekort = tekst.substring(0, 10000);
 
-    // ── Stap 2: Groq AI – opdrachten extraheren ─────────────────────────────
+    // ── Groq AI – opdrachten extraheren ────────────────────────────────
     const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
     const completion = await groq.chat.completions.create({
       model: "llama-3.3-70b-versatile",
       messages: [
         { role: "system", content: SYSTEEM_PROMPT },
-        { role: "user", content: GEBRUIKER_PROMPT(tekst_gekort) },
+        { role: "user", content: GEBRUIKER_PROMPT(tekst_gekort, bestandsnaam) },
       ],
       temperature: 0.1,
       max_tokens: 4096,
@@ -100,7 +75,7 @@ export async function POST(req: NextRequest) {
 
     const antwoord = completion.choices[0]?.message?.content ?? "[]";
 
-    // ── Stap 3: JSON parsen ──────────────────────────────────────────────────
+    // ── JSON parsen ─────────────────────────────────────────────────────
     let opdrachten: {
       les: string;
       type: "kleur" | "markeer";
@@ -110,7 +85,6 @@ export async function POST(req: NextRequest) {
     }[];
 
     try {
-      // Verwijder eventuele markdown code-blokken
       const schoon = antwoord
         .replace(/```json\s*/gi, "")
         .replace(/```\s*/g, "")
@@ -127,14 +101,15 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // ── Stap 4: Opslaan in Supabase ──────────────────────────────────────────
+    // ── Opslaan in Supabase ─────────────────────────────────────────────
+    const supabase = getSupabase();
     const opgeslagen = [];
 
     for (const op of opdrachten) {
       const { data, error } = await supabase
         .from("opdrachten")
         .insert({
-          pdf_naam: file.name,
+          pdf_naam: bestandsnaam,
           les: op.les ?? "Onbekend",
           type: op.type,
           instructie: op.instructie,
@@ -156,7 +131,7 @@ export async function POST(req: NextRequest) {
   } catch (err) {
     console.error("verwerk-pdf fout:", err);
     return NextResponse.json(
-      { error: "Interne serverfout. Controleer de logs." },
+      { error: "Interne serverfout: " + String(err) },
       { status: 500 }
     );
   }

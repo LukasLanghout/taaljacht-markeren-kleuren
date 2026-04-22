@@ -5,17 +5,17 @@ import { supabase, type Opdracht } from "@/lib/supabase";
 
 type UploadStatus =
   | "idle"
-  | "uploading"
+  | "reading"
   | "extracting"
-  | "saving"
+  | "sending"
   | "done"
   | "error";
 
 const STATUS_TEKST: Record<UploadStatus, string> = {
-  idle:       "PDF uploaden",
-  uploading:  "PDF uploaden...",
-  extracting: "🤖 Groq AI zoekt opdrachten...",
-  saving:     "Opslaan in Supabase...",
+  idle:       "PDF verwerken",
+  reading:    "📖 PDF lezen in de browser...",
+  extracting: "🤖 Groq AI zoekt markeer/kleur-opdrachten...",
+  sending:    "💾 Opslaan in Supabase...",
   done:       "✅ Klaar!",
   error:      "❌ Fout opgetreden",
 };
@@ -23,6 +23,7 @@ const STATUS_TEKST: Record<UploadStatus, string> = {
 export default function BeheerPage() {
   const [status, setStatus] = useState<UploadStatus>("idle");
   const [foutmelding, setFoutmelding] = useState("");
+  const [voortgang, setVoortgang] = useState("");
   const [resultaat, setResultaat] = useState<{
     gevonden: number;
     opgeslagen: number;
@@ -30,8 +31,8 @@ export default function BeheerPage() {
   } | null>(null);
   const [bestaandeOpdrachten, setBestaandeOpdrachten] = useState<Opdracht[]>([]);
   const fileRef = useRef<HTMLInputElement>(null);
+  const [bestand, setBestand] = useState<File | null>(null);
 
-  // Laad bestaande opdrachten uit Supabase
   useEffect(() => {
     laadOpdrachten();
   }, []);
@@ -50,40 +51,71 @@ export default function BeheerPage() {
     setBestaandeOpdrachten((prev) => prev.filter((o) => o.id !== id));
   }
 
+  // ── PDF tekst extraheren in de browser ──────────────────────────────────────
+  async function extractPdfTekst(file: File): Promise<string> {
+    // Dynamische import zodat pdfjs alleen in de browser laadt
+    const pdfjs = await import("pdfjs-dist");
+    // Worker via CDN (bespaart bundel-grootte)
+    pdfjs.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.min.mjs`;
+
+    const buffer = await file.arrayBuffer();
+    const pdf = await pdfjs.getDocument({ data: buffer }).promise;
+
+    let volledigeTekst = "";
+    for (let i = 1; i <= pdf.numPages; i++) {
+      setVoortgang(`Pagina ${i} van ${pdf.numPages} lezen...`);
+      const pagina = await pdf.getPage(i);
+      const content = await pagina.getTextContent();
+      const paginaTekst = content.items
+        .map((item) => ("str" in item ? item.str : ""))
+        .join(" ");
+      volledigeTekst += `\n\n=== Pagina ${i} ===\n${paginaTekst}`;
+    }
+    return volledigeTekst;
+  }
+
   async function handleUpload(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
-    const file = fileRef.current?.files?.[0];
-    if (!file) return;
+    if (!bestand) return;
 
     setFoutmelding("");
     setResultaat(null);
-    setStatus("uploading");
-
-    const form = new FormData();
-    form.append("pdf", file);
 
     try {
+      // Stap 1: PDF in browser lezen
+      setStatus("reading");
+      const tekst = await extractPdfTekst(bestand);
+      setVoortgang(`${tekst.length.toLocaleString("nl-NL")} tekens gelezen`);
+
+      // Stap 2: Alleen de tekst naar de server sturen
       setStatus("extracting");
       const res = await fetch("/api/verwerk-pdf", {
         method: "POST",
-        body: form,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          tekst,
+          bestandsnaam: bestand.name,
+        }),
       });
 
-      const json = await res.json();
-
       if (!res.ok) {
-        setStatus("error");
-        setFoutmelding(json.error ?? "Onbekende fout.");
-        return;
+        const msg = await res.text();
+        let parsed;
+        try { parsed = JSON.parse(msg); } catch { parsed = { error: msg.substring(0, 200) }; }
+        throw new Error(parsed.error ?? "Onbekende fout.");
       }
 
+      const json = await res.json();
       setStatus("done");
       setResultaat(json);
+      setVoortgang("");
       await laadOpdrachten();
+      setBestand(null);
       if (fileRef.current) fileRef.current.value = "";
     } catch (err) {
       setStatus("error");
-      setFoutmelding(String(err));
+      setFoutmelding(err instanceof Error ? err.message : String(err));
+      setVoortgang("");
     }
   }
 
@@ -94,11 +126,10 @@ export default function BeheerPage() {
         <div className="flex items-center gap-4 mb-8">
           <a href="/" className="text-gray-400 hover:text-gray-600 text-sm">← Terug</a>
           <div>
-            <h1 className="text-3xl font-extrabold text-gray-800">
-              🎓 Beheer – Juf / Meester
-            </h1>
+            <h1 className="text-3xl font-extrabold text-gray-800">🎓 Beheer – Juf / Meester</h1>
             <p className="text-gray-500 text-sm mt-1">
-              Upload de PDF en Groq AI haalt automatisch de markeer/kleur-opdrachten eruit.
+              Upload de PDF. De tekst wordt in je browser gelezen, daarna haalt Groq AI de
+              markeer/kleur-opdrachten eruit.
             </p>
           </div>
         </div>
@@ -116,20 +147,22 @@ export default function BeheerPage() {
                 type="file"
                 accept="application/pdf"
                 className="hidden"
-                onChange={() => setStatus("idle")}
+                onChange={(e) => { setBestand(e.target.files?.[0] ?? null); setStatus("idle"); }}
               />
               <div className="text-4xl mb-2">📑</div>
               <p className="text-gray-600 font-semibold">Klik om een PDF te kiezen</p>
               <p className="text-gray-400 text-sm mt-1">
-                {fileRef.current?.files?.[0]?.name ?? "Nog geen bestand gekozen"}
+                {bestand ? `${bestand.name} (${(bestand.size / 1024 / 1024).toFixed(1)} MB)` : "Nog geen bestand gekozen"}
               </p>
             </div>
 
             <button
               type="submit"
-              disabled={status === "extracting" || status === "uploading"}
+              disabled={!bestand || status === "reading" || status === "extracting" || status === "sending"}
               className={`w-full py-3 rounded-xl font-bold text-white text-lg transition-all
-                ${status === "extracting" || status === "uploading"
+                ${!bestand
+                  ? "bg-gray-300 cursor-not-allowed"
+                  : status === "reading" || status === "extracting" || status === "sending"
                   ? "bg-blue-300 cursor-not-allowed"
                   : status === "done"
                   ? "bg-green-500 hover:bg-green-600"
@@ -142,11 +175,13 @@ export default function BeheerPage() {
             </button>
           </form>
 
-          {/* Status indicator */}
-          {(status === "extracting" || status === "uploading") && (
+          {(status === "reading" || status === "extracting" || status === "sending") && (
             <div className="mt-4 flex items-center gap-3 text-blue-600">
               <div className="animate-spin w-5 h-5 border-2 border-blue-500 border-t-transparent rounded-full" />
-              <span className="text-sm font-medium">{STATUS_TEKST[status]}</span>
+              <div className="flex-1">
+                <p className="text-sm font-medium">{STATUS_TEKST[status]}</p>
+                {voortgang && <p className="text-xs text-gray-500">{voortgang}</p>}
+              </div>
             </div>
           )}
 
@@ -159,8 +194,7 @@ export default function BeheerPage() {
           {resultaat && status === "done" && (
             <div className="mt-4 bg-green-50 border border-green-200 rounded-xl p-4">
               <p className="text-green-800 font-semibold">
-                ✅ {resultaat.gevonden} opdracht{resultaat.gevonden !== 1 ? "en" : ""} gevonden,{" "}
-                {resultaat.opgeslagen} opgeslagen!
+                ✅ {resultaat.gevonden} opdracht{resultaat.gevonden !== 1 ? "en" : ""} gevonden, {resultaat.opgeslagen} opgeslagen!
               </p>
               <ul className="mt-2 space-y-1">
                 {resultaat.opdrachten.map((op) => (
@@ -180,9 +214,7 @@ export default function BeheerPage() {
           </h2>
 
           {bestaandeOpdrachten.length === 0 ? (
-            <p className="text-gray-400 text-sm">
-              Nog geen opdrachten. Upload een PDF om te beginnen.
-            </p>
+            <p className="text-gray-400 text-sm">Nog geen opdrachten. Upload een PDF om te beginnen.</p>
           ) : (
             <div className="space-y-3">
               {bestaandeOpdrachten.map((op) => (
@@ -191,7 +223,7 @@ export default function BeheerPage() {
                   className="border border-gray-200 rounded-xl p-4 flex items-start justify-between gap-4"
                 >
                   <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 mb-1">
+                    <div className="flex items-center gap-2 mb-1 flex-wrap">
                       <span className="font-bold text-gray-800">{op.les}</span>
                       <span
                         className={`text-xs px-2 py-0.5 rounded-full font-semibold ${

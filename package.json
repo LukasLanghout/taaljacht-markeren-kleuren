@@ -14,13 +14,12 @@
     "react-dom": "^19.0.0",
     "@supabase/supabase-js": "^2.47.10",
     "groq-sdk": "^0.9.1",
-    "pdf-parse": "^1.1.1"
+    "pdfjs-dist": "^4.10.38"
   },
   "devDependencies": {
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
-    "@types/pdf-parse": "^1.1.4",
     "eslint": "^9",
     "eslint-config-next": "15.3.9",
     "postcss": "^8",
