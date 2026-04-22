@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//c/Users/ljlan/OneDrive - Office 365 Fontys/**)",
+      "Bash(pandoc \"Analyse Taaljacht Groep 5 Blok 7.docx\" -o /tmp/analyse.md)",
+      "Read(//tmp/**)",
+      "PowerShell(node --version)",
+      "PowerShell(npm --version)",
+      "PowerShell(npm install --cache C:\\\\Temp\\\\npm-cache 2>&1)"
+    ]
+  }
+}
