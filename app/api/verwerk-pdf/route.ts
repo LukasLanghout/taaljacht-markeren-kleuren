@@ -57,8 +57,8 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Max 10.000 tekens voor Groq
-    const tekst_gekort = tekst.substring(0, 10000);
+    // Max 20.000 tekens voor Groq (OCR-tekst is al compact, geen PDF-ruis)
+    const tekst_gekort = tekst.substring(0, 20000);
 
     // ── Groq AI – opdrachten extraheren ────────────────────────────────
     const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });

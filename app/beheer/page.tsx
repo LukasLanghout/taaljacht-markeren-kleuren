@@ -5,7 +5,8 @@ import { supabase, type Opdracht } from "@/lib/supabase";
 
 type UploadStatus =
   | "idle"
-  | "reading"
+  | "rendering"
+  | "ocr"
   | "extracting"
   | "sending"
   | "done"
@@ -13,7 +14,8 @@ type UploadStatus =
 
 const STATUS_TEKST: Record<UploadStatus, string> = {
   idle:       "PDF verwerken",
-  reading:    "📖 PDF lezen in de browser...",
+  rendering:  "🖼️ PDF-pagina's renderen...",
+  ocr:        "👁️ Groq Vision leest de pagina's...",
   extracting: "🤖 Groq AI zoekt markeer/kleur-opdrachten...",
   sending:    "💾 Opslaan in Supabase...",
   done:       "✅ Klaar!",
@@ -51,11 +53,40 @@ export default function BeheerPage() {
     setBestaandeOpdrachten((prev) => prev.filter((o) => o.id !== id));
   }
 
-  // ── PDF tekst extraheren in de browser ──────────────────────────────────────
+  // ── PDF pagina renderen naar JPEG (base64 data URL) ─────────────────────────
+  async function renderPaginaAlsImage(
+    pagina: import("pdfjs-dist").PDFPageProxy
+  ): Promise<string> {
+    // Schaal 1.8 geeft ~1400px breed — goed leesbaar voor Vision zonder enorme payload
+    const viewport = pagina.getViewport({ scale: 1.8 });
+    const canvas = document.createElement("canvas");
+    canvas.width = viewport.width;
+    canvas.height = viewport.height;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("Canvas 2D-context niet beschikbaar");
+    await pagina.render({ canvasContext: ctx, viewport }).promise;
+    // JPEG op 0.85 kwaliteit is een goede balans tussen grootte en leesbaarheid
+    return canvas.toDataURL("image/jpeg", 0.85);
+  }
+
+  // ── OCR van één pagina via /api/ocr-pagina (Groq Vision) ────────────────────
+  async function ocrPagina(image: string, paginaNum: number): Promise<string> {
+    const res = await fetch("/api/ocr-pagina", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ image, paginaNum }),
+    });
+    if (!res.ok) {
+      const msg = await res.text();
+      throw new Error(`OCR pagina ${paginaNum} mislukt: ${msg.substring(0, 200)}`);
+    }
+    const json = await res.json();
+    return json.tekst ?? "";
+  }
+
+  // ── Hele PDF naar tekst via Vision-OCR ──────────────────────────────────────
   async function extractPdfTekst(file: File): Promise<string> {
-    // Dynamische import zodat pdfjs alleen in de browser laadt
     const pdfjs = await import("pdfjs-dist");
-    // Worker via CDN (bespaart bundel-grootte)
     pdfjs.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.min.mjs`;
 
     const buffer = await file.arrayBuffer();
@@ -63,13 +94,16 @@ export default function BeheerPage() {
 
     let volledigeTekst = "";
     for (let i = 1; i <= pdf.numPages; i++) {
-      setVoortgang(`Pagina ${i} van ${pdf.numPages} lezen...`);
+      setStatus("rendering");
+      setVoortgang(`Pagina ${i} van ${pdf.numPages} renderen...`);
       const pagina = await pdf.getPage(i);
-      const content = await pagina.getTextContent();
-      const paginaTekst = content.items
-        .map((item) => ("str" in item ? item.str : ""))
-        .join(" ");
-      volledigeTekst += `\n\n=== Pagina ${i} ===\n${paginaTekst}`;
+      const image = await renderPaginaAlsImage(pagina);
+
+      setStatus("ocr");
+      setVoortgang(`Pagina ${i} van ${pdf.numPages} via Groq Vision lezen...`);
+      const tekst = await ocrPagina(image, i);
+
+      volledigeTekst += `\n\n=== Pagina ${i} ===\n${tekst}`;
     }
     return volledigeTekst;
   }
@@ -82,8 +116,7 @@ export default function BeheerPage() {
     setResultaat(null);
 
     try {
-      // Stap 1: PDF in browser lezen
-      setStatus("reading");
+      // Stap 1: PDF pagina voor pagina door Vision-OCR halen
       const tekst = await extractPdfTekst(bestand);
       setVoortgang(`${tekst.length.toLocaleString("nl-NL")} tekens gelezen`);
 
@@ -158,11 +191,11 @@ export default function BeheerPage() {
 
             <button
               type="submit"
-              disabled={!bestand || status === "reading" || status === "extracting" || status === "sending"}
+              disabled={!bestand || status === "rendering" || status === "ocr" || status === "extracting" || status === "sending"}
               className={`w-full py-3 rounded-xl font-bold text-white text-lg transition-all
                 ${!bestand
                   ? "bg-gray-300 cursor-not-allowed"
-                  : status === "reading" || status === "extracting" || status === "sending"
+                  : status === "rendering" || status === "ocr" || status === "extracting" || status === "sending"
                   ? "bg-blue-300 cursor-not-allowed"
                   : status === "done"
                   ? "bg-green-500 hover:bg-green-600"
@@ -175,7 +208,7 @@ export default function BeheerPage() {
             </button>
           </form>
 
-          {(status === "reading" || status === "extracting" || status === "sending") && (
+          {(status === "rendering" || status === "ocr" || status === "extracting" || status === "sending") && (
             <div className="mt-4 flex items-center gap-3 text-blue-600">
               <div className="animate-spin w-5 h-5 border-2 border-blue-500 border-t-transparent rounded-full" />
               <div className="flex-1">
