@@ -57,16 +57,16 @@ export default function BeheerPage() {
   async function renderPaginaAlsImage(
     pagina: import("pdfjs-dist").PDFPageProxy
   ): Promise<string> {
-    // Schaal 1.8 geeft ~1400px breed — goed leesbaar voor Vision zonder enorme payload
-    const viewport = pagina.getViewport({ scale: 1.8 });
+    // Schaal 1.4 = ~1100px breed — nog goed leesbaar maar minder image-tokens (~30% minder TPM-verbruik)
+    const viewport = pagina.getViewport({ scale: 1.4 });
     const canvas = document.createElement("canvas");
     canvas.width = viewport.width;
     canvas.height = viewport.height;
     const ctx = canvas.getContext("2d");
     if (!ctx) throw new Error("Canvas 2D-context niet beschikbaar");
     await pagina.render({ canvasContext: ctx, viewport }).promise;
-    // JPEG op 0.85 kwaliteit is een goede balans tussen grootte en leesbaarheid
-    return canvas.toDataURL("image/jpeg", 0.85);
+    // JPEG op 0.8 kwaliteit
+    return canvas.toDataURL("image/jpeg", 0.8);
   }
 
   // ── OCR van één pagina via /api/ocr-pagina (Groq Vision) ────────────────────
@@ -111,6 +111,10 @@ export default function BeheerPage() {
     const pdf = await pdfjs.getDocument({ data: buffer }).promise;
 
     let volledigeTekst = "";
+    // Proactieve wachttijd tussen pagina's om binnen Groq's TPM-limiet te blijven.
+    // Gratis tier vision ~30k TPM; bij ~1500 tokens/pagina = ~20 pagina's/min veilig
+    const WACHT_TUSSEN_PAGINAS_MS = 2500;
+
     for (let i = 1; i <= pdf.numPages; i++) {
       setStatus("rendering");
       setVoortgang(`Pagina ${i} van ${pdf.numPages} renderen...`);
@@ -122,6 +126,11 @@ export default function BeheerPage() {
       const tekst = await ocrPagina(image, i);
 
       volledigeTekst += `\n\n=== Pagina ${i} ===\n${tekst}`;
+
+      // Throttle behalve op de laatste pagina
+      if (i < pdf.numPages) {
+        await new Promise((r) => setTimeout(r, WACHT_TUSSEN_PAGINAS_MS));
+      }
     }
     return volledigeTekst;
   }
