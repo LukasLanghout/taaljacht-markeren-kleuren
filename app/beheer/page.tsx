@@ -71,17 +71,35 @@ export default function BeheerPage() {
 
   // ── OCR van één pagina via /api/ocr-pagina (Groq Vision) ────────────────────
   async function ocrPagina(image: string, paginaNum: number): Promise<string> {
-    const res = await fetch("/api/ocr-pagina", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ image, paginaNum }),
-    });
-    if (!res.ok) {
+    const MAX_POGINGEN = 5;
+    for (let poging = 1; poging <= MAX_POGINGEN; poging++) {
+      const res = await fetch("/api/ocr-pagina", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ image, paginaNum }),
+      });
+
+      if (res.ok) {
+        const json = await res.json();
+        return json.tekst ?? "";
+      }
+
+      // 429 = rate-limit → wacht en probeer opnieuw
+      if (res.status === 429 && poging < MAX_POGINGEN) {
+        const wachtSec = 30 * poging; // 30s, 60s, 90s, 120s
+        for (let s = wachtSec; s > 0; s--) {
+          setVoortgang(
+            `Pagina ${paginaNum}: Groq rate-limit, wacht nog ${s}s (poging ${poging}/${MAX_POGINGEN - 1})...`
+          );
+          await new Promise((r) => setTimeout(r, 1000));
+        }
+        continue;
+      }
+
       const msg = await res.text();
       throw new Error(`OCR pagina ${paginaNum} mislukt: ${msg.substring(0, 200)}`);
     }
-    const json = await res.json();
-    return json.tekst ?? "";
+    throw new Error(`OCR pagina ${paginaNum} blijvend gefaald (rate-limit).`);
   }
 
   // ── Hele PDF naar tekst via Vision-OCR ──────────────────────────────────────
