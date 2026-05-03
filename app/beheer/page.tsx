@@ -84,12 +84,25 @@ export default function BeheerPage() {
         return json.tekst ?? "";
       }
 
-      // 429 = rate-limit → wacht en probeer opnieuw
+      // 429 = rate-limit → log details en wacht
       if (res.status === 429 && poging < MAX_POGINGEN) {
+        const body = await res.text();
+        let detail: { groq_message?: string; groq_code?: string } = {};
+        try {
+          detail = JSON.parse(body);
+        } catch {
+          /* niet-JSON */
+        }
+        console.warn(
+          `[OCR p${paginaNum}] Groq 429:`,
+          detail.groq_code ?? "",
+          detail.groq_message ?? body.substring(0, 300)
+        );
+
         const wachtSec = 30 * poging; // 30s, 60s, 90s, 120s
         for (let s = wachtSec; s > 0; s--) {
           setVoortgang(
-            `Pagina ${paginaNum}: Groq rate-limit, wacht nog ${s}s (poging ${poging}/${MAX_POGINGEN - 1})...`
+            `Pagina ${paginaNum}: ${detail.groq_code ?? "rate_limit"} — wacht nog ${s}s (poging ${poging}/${MAX_POGINGEN - 1})...`
           );
           await new Promise((r) => setTimeout(r, 1000));
         }
@@ -97,7 +110,7 @@ export default function BeheerPage() {
       }
 
       const msg = await res.text();
-      throw new Error(`OCR pagina ${paginaNum} mislukt: ${msg.substring(0, 200)}`);
+      throw new Error(`OCR pagina ${paginaNum} mislukt: ${msg.substring(0, 400)}`);
     }
     throw new Error(`OCR pagina ${paginaNum} blijvend gefaald (rate-limit).`);
   }

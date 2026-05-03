@@ -91,14 +91,21 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // Alle pogingen op; geef nette 429 terug zodat de client kan beslissen
+    // Alle pogingen op; geef volledige Groq-foutdetails terug
+    const fout = laatsteFout as {
+      message?: string;
+      status?: number;
+      error?: { message?: string; code?: string };
+      headers?: Record<string, string>;
+    };
     return NextResponse.json(
       {
-        error:
-          "Groq rate-limit bereikt voor llama-4-scout (gratis tier). " +
-          "Wacht 1-2 minuten en probeer opnieuw, of upgrade je Groq-account. " +
-          "Detail: " +
-          String((laatsteFout as { message?: string })?.message ?? laatsteFout),
+        error: "Groq rate-limit bereikt na alle retries.",
+        groq_message: fout?.error?.message ?? fout?.message ?? String(laatsteFout),
+        groq_code: fout?.error?.code ?? null,
+        retry_after_header: fout?.headers?.["retry-after"] ?? null,
+        tip: "Open https://console.groq.com/settings/limits om je quota te zien. " +
+             "Vision-requests hebben aparte (lagere) limieten dan tekst-requests.",
       },
       { status: 429 }
     );
