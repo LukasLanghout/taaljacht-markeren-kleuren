@@ -1,10 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
+import Groq from "groq-sdk";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
 /**
- * OCR op één PDF-pagina via Google Gemini 2.5 Flash.
+ * OCR op één PDF-pagina via Groq's Llama 4 Scout vision-model.
  * Input:  { image: "data:image/jpeg;base64,...", paginaNum: number }
  * Output: { tekst: string }
  */
@@ -21,67 +22,43 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
+    if (!process.env.GROQ_API_KEY) {
       return NextResponse.json(
-        { error: "GEMINI_API_KEY ontbreekt in environment variables." },
+        { error: "GROQ_API_KEY ontbreekt in environment variables." },
         { status: 500 }
       );
     }
 
-    // "data:image/jpeg;base64,AAAA..." → mime + base64 splitsen
-    const match = image.match(/^data:([^;]+);base64,(.*)$/);
-    if (!match) {
-      return NextResponse.json(
-        { error: "Afbeelding heeft geen geldig data-URL-formaat." },
-        { status: 400 }
-      );
-    }
-    const mimeType = match[1];
-    const base64Data = match[2];
+    const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
-    const prompt =
-      `Dit is pagina ${paginaNum} uit een Nederlands basisschoolwerkboek (Taal Jacht, groep 5). ` +
-      `Geef ALLE tekst die je op deze pagina ziet, woordelijk en in leesvolgorde. ` +
-      `Geen uitleg, geen markdown, geen samenvatting — alleen de pure tekst zoals ze erop staat. ` +
-      `Behoud opdrachtnummers (zoals "Les 5", "a", "b", "c", "d") en behoud zinnen volledig. ` +
-      `Bij opdrachten waarin leerlingen iets moeten markeren of kleuren, schrijf je de instructie ` +
-      `en daarna alle zinnen/fragmenten die gekleurd of gemarkeerd moeten worden uit.`;
-
-    const url =
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
-
-    const geminiRes = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [
-          {
-            parts: [
-              { text: prompt },
-              { inline_data: { mime_type: mimeType, data: base64Data } },
-            ],
-          },
-        ],
-        generationConfig: {
-          temperature: 0.1,
-          maxOutputTokens: 4096,
+    const completion = await groq.chat.completions.create({
+      model: "meta-llama/llama-4-scout-17b-16e-instruct",
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text:
+                `Dit is pagina ${paginaNum} uit een Nederlands basisschoolwerkboek (Taal Jacht, groep 5). ` +
+                `Geef ALLE tekst die je op deze pagina ziet, woordelijk en in leesvolgorde. ` +
+                `Geen uitleg, geen markdown, geen samenvatting — alleen de pure tekst zoals ze erop staat. ` +
+                `Behoud opdrachtnummers (zoals "Les 5", "a", "b", "c", "d") en behoud zinnen volledig. ` +
+                `Bij opdrachten waarin leerlingen iets moeten markeren of kleuren, schrijf je de instructie ` +
+                `en daarna alle zinnen/fragmenten die gekleurd of gemarkeerd moeten worden uit.`,
+            },
+            {
+              type: "image_url",
+              image_url: { url: image },
+            },
+          ],
         },
-      }),
+      ],
+      temperature: 0.1,
+      max_tokens: 4096,
     });
 
-    if (!geminiRes.ok) {
-      const errText = await geminiRes.text();
-      console.error("Gemini API-fout:", errText);
-      return NextResponse.json(
-        { error: `Gemini API-fout (${geminiRes.status}): ${errText.substring(0, 300)}` },
-        { status: 500 }
-      );
-    }
-
-    const json = await geminiRes.json();
-    const tekst: string =
-      json?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+    const tekst = completion.choices[0]?.message?.content ?? "";
 
     return NextResponse.json({ tekst });
   } catch (err) {
