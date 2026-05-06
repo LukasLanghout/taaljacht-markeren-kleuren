@@ -28,7 +28,16 @@ export const supabase = new Proxy({} as SupabaseClient, {
 export type Zin = {
   id: string;
   tekst: string;
+  /** Optionele groep-aanduiding: bij kleur_woord_* hoort de zin/optie bij deze context. */
+  context?: string;
 };
+
+export type OpdrachtSubtype =
+  | "kleur_zinnen"
+  | "markeer"
+  | "kleur_woord_zin"
+  | "kleur_woord_rij"
+  | "kleur_woord_plaatje";
 
 export type Opdracht = {
   id: string;
@@ -39,7 +48,10 @@ export type Opdracht = {
   zinnen: Zin[];
   extra: {
     kleuren?: string[];
-    vraag_d?: boolean;
+    vraag_d?: string | boolean | null;
+    subtype?: OpdrachtSubtype;
+    bron?: string | null;
+    aantal_per_groep?: number | null;
   };
   aangemaakt_op: string;
 };
