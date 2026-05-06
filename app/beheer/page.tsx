@@ -35,6 +35,12 @@ export default function BeheerPage() {
   const fileRef = useRef<HTMLInputElement>(null);
   const [bestand, setBestand] = useState<File | null>(null);
 
+  const [genereerStatus, setGenereerStatus] = useState<
+    "idle" | "bezig" | "klaar" | "error"
+  >("idle");
+  const [genereerVoortgang, setGenereerVoortgang] = useState("");
+  const [genereerBezigId, setGenereerBezigId] = useState<string | null>(null);
+
   useEffect(() => {
     laadOpdrachten();
   }, []);
@@ -51,6 +57,110 @@ export default function BeheerPage() {
     if (!confirm("Weet je zeker dat je deze opdracht wilt verwijderen?")) return;
     await supabase.from("opdrachten").delete().eq("id", id);
     setBestaandeOpdrachten((prev) => prev.filter((o) => o.id !== id));
+  }
+
+  // ── Antwoorden automatisch genereren ─────────────────────────────────
+  async function genereerAntwoordenVoorOpdracht(id: string): Promise<{
+    success: boolean;
+    aantal_antwoorden?: number;
+    error?: string;
+  }> {
+    const MAX_POGINGEN = 4;
+    for (let poging = 1; poging <= MAX_POGINGEN; poging++) {
+      const res = await fetch("/api/genereer-antwoorden", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id }),
+      });
+      if (res.ok) return await res.json();
+
+      // 429 = wachten en opnieuw proberen
+      if (res.status === 429 && poging < MAX_POGINGEN) {
+        const wachtSec = 30 * poging;
+        for (let s = wachtSec; s > 0; s--) {
+          setGenereerVoortgang(`Rate-limit — wacht nog ${s}s...`);
+          await new Promise((r) => setTimeout(r, 1000));
+        }
+        continue;
+      }
+
+      const tekst = await res.text();
+      let parsed: { error?: string };
+      try { parsed = JSON.parse(tekst); } catch { parsed = { error: tekst.substring(0, 200) }; }
+      return { success: false, error: parsed.error ?? `HTTP ${res.status}` };
+    }
+    return { success: false, error: "Rate-limit blijvend" };
+  }
+
+  async function genereerVoorEen(id: string) {
+    setGenereerBezigId(id);
+    const res = await genereerAntwoordenVoorOpdracht(id);
+    if (!res.success) {
+      alert("Fout bij genereren: " + (res.error ?? "onbekend"));
+    }
+    setGenereerBezigId(null);
+    await laadOpdrachten();
+  }
+
+  async function genereerVoorAlle() {
+    if (bestaandeOpdrachten.length === 0) return;
+    const teVerwerken = bestaandeOpdrachten.filter(
+      (o) =>
+        Array.isArray(o.zinnen) &&
+        o.zinnen.length > 0 &&
+        (!o.extra?.antwoorden || Object.keys(o.extra.antwoorden).length === 0)
+    );
+    if (teVerwerken.length === 0) {
+      alert("Alle opdrachten met zinnen hebben al antwoorden. Niets te doen.");
+      return;
+    }
+    if (
+      !confirm(
+        `Antwoorden genereren voor ${teVerwerken.length} opdracht${
+          teVerwerken.length !== 1 ? "en" : ""
+        }? Dit kan een paar minuten duren (6s pauze tussen elke opdracht om binnen ` +
+          `de Gemini rate-limit te blijven).`
+      )
+    )
+      return;
+
+    setGenereerStatus("bezig");
+    let geslaagd = 0;
+    let mislukt = 0;
+    const fouten: string[] = [];
+
+    for (let i = 0; i < teVerwerken.length; i++) {
+      const op = teVerwerken[i];
+      setGenereerBezigId(op.id);
+      setGenereerVoortgang(
+        `${i + 1} van ${teVerwerken.length}: ${op.les} — ${op.instructie.substring(0, 60)}...`
+      );
+      const res = await genereerAntwoordenVoorOpdracht(op.id);
+      if (res.success) geslaagd++;
+      else {
+        mislukt++;
+        fouten.push(`${op.les}: ${res.error}`);
+      }
+
+      // Throttle 6s tussen opdrachten (≤15 RPM)
+      if (i < teVerwerken.length - 1) {
+        for (let s = 6; s > 0; s--) {
+          setGenereerVoortgang(
+            `${i + 1}/${teVerwerken.length} klaar (${geslaagd} ✓, ${mislukt} ✗) — wacht ${s}s voor volgende...`
+          );
+          await new Promise((r) => setTimeout(r, 1000));
+        }
+      }
+    }
+
+    setGenereerBezigId(null);
+    setGenereerStatus(mislukt === 0 ? "klaar" : "error");
+    setGenereerVoortgang(
+      `Klaar: ${geslaagd} geslaagd, ${mislukt} mislukt${
+        fouten.length > 0 ? "\n\nFouten:\n- " + fouten.slice(0, 5).join("\n- ") : ""
+      }`
+    );
+    await laadOpdrachten();
   }
 
   async function verwijderAlleOpdrachten() {
@@ -375,20 +485,61 @@ export default function BeheerPage() {
 
         {/* Bestaande opdrachten */}
         <div className="bg-white rounded-2xl shadow p-6">
-          <div className="flex items-center justify-between mb-4 gap-3">
+          <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
             <h2 className="text-xl font-bold text-gray-800">
               📋 Opgeslagen opdrachten ({bestaandeOpdrachten.length})
             </h2>
             {bestaandeOpdrachten.length > 0 && (
-              <button
-                onClick={verwijderAlleOpdrachten}
-                className="bg-red-500 hover:bg-red-600 text-white text-xs font-bold px-3 py-1.5 rounded-lg transition-colors"
-                title="Verwijder alle opdrachten"
-              >
-                🗑 Alles verwijderen
-              </button>
+              <div className="flex gap-2 flex-wrap">
+                <button
+                  onClick={genereerVoorAlle}
+                  disabled={genereerStatus === "bezig"}
+                  className={`text-white text-xs font-bold px-3 py-1.5 rounded-lg transition-colors
+                    ${genereerStatus === "bezig"
+                      ? "bg-blue-300 cursor-not-allowed"
+                      : "bg-blue-500 hover:bg-blue-600"
+                    }`}
+                  title="Laat de AI antwoorden bedenken voor alle opdrachten zonder antwoorden"
+                >
+                  {genereerStatus === "bezig"
+                    ? "🤖 Bezig..."
+                    : "🤖 Antwoorden genereren"}
+                </button>
+                <button
+                  onClick={verwijderAlleOpdrachten}
+                  className="bg-red-500 hover:bg-red-600 text-white text-xs font-bold px-3 py-1.5 rounded-lg transition-colors"
+                  title="Verwijder alle opdrachten"
+                >
+                  🗑 Alles verwijderen
+                </button>
+              </div>
             )}
           </div>
+
+          {/* Voortgang van bulk-genereren */}
+          {genereerStatus !== "idle" && (
+            <div className={`mb-4 rounded-xl px-4 py-3 text-sm whitespace-pre-line
+              ${genereerStatus === "bezig" ? "bg-blue-50 border border-blue-200 text-blue-800" :
+                genereerStatus === "klaar" ? "bg-green-50 border border-green-200 text-green-800" :
+                "bg-amber-50 border border-amber-200 text-amber-800"}`}>
+              {genereerStatus === "bezig" && (
+                <span className="inline-block animate-spin mr-2">⏳</span>
+              )}
+              <strong>
+                {genereerStatus === "bezig" ? "Antwoorden genereren..." :
+                 genereerStatus === "klaar" ? "✅ Antwoorden klaar" : "⚠️ Met fouten klaar"}
+              </strong>
+              {genereerVoortgang && <div className="mt-1 text-xs">{genereerVoortgang}</div>}
+              {(genereerStatus === "klaar" || genereerStatus === "error") && (
+                <button
+                  onClick={() => setGenereerStatus("idle")}
+                  className="mt-2 text-xs underline opacity-70 hover:opacity-100"
+                >
+                  sluiten
+                </button>
+              )}
+            </div>
+          )}
 
           {bestaandeOpdrachten.length === 0 ? (
             <p className="text-gray-400 text-sm">Nog geen opdrachten. Upload een PDF om te beginnen.</p>
@@ -442,12 +593,29 @@ export default function BeheerPage() {
                         ⚠ Geen antwoord
                       </span>
                     )}
+                    <button
+                      onClick={() => genereerVoorEen(op.id)}
+                      disabled={
+                        genereerBezigId !== null ||
+                        !Array.isArray(op.zinnen) ||
+                        op.zinnen.length === 0
+                      }
+                      className={`text-white text-xs font-bold px-2.5 py-1.5 rounded-lg transition-colors
+                        ${genereerBezigId === op.id
+                          ? "bg-blue-300 cursor-wait"
+                          : genereerBezigId !== null
+                          ? "bg-blue-300 cursor-not-allowed opacity-50"
+                          : "bg-blue-400 hover:bg-blue-500"}`}
+                      title="AI laat antwoorden bedenken voor deze opdracht"
+                    >
+                      {genereerBezigId === op.id ? "⏳" : "🤖"}
+                    </button>
                     <a
                       href={`/opdracht/${op.id}?modus=antwoord`}
                       className="bg-blue-500 hover:bg-blue-600 text-white text-xs font-bold px-3 py-1.5 rounded-lg transition-colors"
-                      title="Antwoorden invullen"
+                      title="Antwoorden zelf invullen"
                     >
-                      ✏️ Antwoord
+                      ✏️
                     </a>
                     <a
                       href={`/opdracht/${op.id}`}
