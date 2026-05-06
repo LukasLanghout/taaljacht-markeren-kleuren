@@ -192,13 +192,22 @@ export async function POST(req: NextRequest) {
 
       // Niet-retryable
       if (res.status !== 429 && res.status !== 503) {
+        const isLeaked = /leaked|API key.*reported/i.test(errText);
+        let userMsg = `Gemini API-fout (${res.status})`;
+        if (isLeaked) {
+          userMsg =
+            "Gemini API-key is door Google als gelekt gemarkeerd. " +
+            "Maak een nieuwe key aan op https://aistudio.google.com/apikey " +
+            "en zet die in Vercel env-vars (GEMINI_API_KEY).";
+        } else if (res.status === 403) {
+          userMsg = "Gemini permission denied (403). Check API-key in Vercel env-vars.";
+        } else if (res.status === 401) {
+          userMsg = "Gemini API-key ongeldig (401). Check Vercel env-vars.";
+        }
         console.error(`Gemini extract-fout (${res.status}):`, errText.substring(0, 300));
         return NextResponse.json(
-          {
-            error: `Gemini API-fout (${res.status})`,
-            detail: errText.substring(0, 400),
-          },
-          { status: res.status === 401 ? 401 : 500 }
+          { error: userMsg, detail: errText.substring(0, 400) },
+          { status: res.status }
         );
       }
 
