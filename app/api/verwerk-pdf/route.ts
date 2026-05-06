@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import Groq from "groq-sdk";
 import { getSupabase } from "@/lib/supabase";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
+
+const MODEL = "gemini-2.5-flash";
 
 const SYSTEEM_PROMPT = `
 Je bent een assistent die opdrachten extraheert uit Nederlandse basisschoolboeken (Taal Jacht, groep 5).
@@ -29,7 +30,7 @@ Er zijn DRIE varianten:
    → kleuren = [] (gewoon highlight).
 
 Geef het resultaat als een JSON array. Geen uitleg, geen markdown, ALLEEN geldige JSON.
-`;
+`.trim();
 
 const GEBRUIKER_PROMPT = (tekst: string, bestandsnaam: string) => `
 Hier is de tekst uit het PDF-bestand "${bestandsnaam}":
@@ -68,7 +69,7 @@ Regels:
 - Als de brontekst (waar de zinnen vandaan komen) op een ANDERE pagina staat dan de opdracht, zoek die pagina op in de meegestuurde tekst en haal daar de zinnen vandaan.
 - Bij "kleur_zinnen": neem de brontekst zin-voor-zin op, niet samengevat. Splits op leestekens (./?/!).
 - Geef bij geen opdrachten een lege array: [].
-`;
+`.trim();
 
 export async function POST(req: NextRequest) {
   try {
@@ -83,23 +84,92 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Max 20.000 tekens voor Groq (OCR-tekst is al compact, geen PDF-ruis)
-    const tekst_gekort = tekst.substring(0, 20000);
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      return NextResponse.json(
+        { error: "GEMINI_API_KEY ontbreekt in environment variables." },
+        { status: 500 }
+      );
+    }
 
-    // ── Groq AI – opdrachten extraheren ────────────────────────────────
-    const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+    // Max 30.000 tekens — Gemini 2.5 Flash heeft ruim contextvenster
+    const tekst_gekort = tekst.substring(0, 30000);
 
-    const completion = await groq.chat.completions.create({
-      model: "llama-3.3-70b-versatile",
-      messages: [
-        { role: "system", content: SYSTEEM_PROMPT },
-        { role: "user", content: GEBRUIKER_PROMPT(tekst_gekort, bestandsnaam) },
-      ],
-      temperature: 0.1,
-      max_tokens: 4096,
-    });
+    // ── Gemini 2.5 Flash – opdrachten extraheren als JSON ───────────────
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${apiKey}`;
 
-    const antwoord = completion.choices[0]?.message?.content ?? "[]";
+    const MAX_POGINGEN = 4;
+    let laatsteFout: { message: string; status?: number } | null = null;
+    let antwoord = "[]";
+
+    for (let poging = 1; poging <= MAX_POGINGEN; poging++) {
+      const geminiRes = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          systemInstruction: {
+            parts: [{ text: SYSTEEM_PROMPT }],
+          },
+          contents: [
+            {
+              role: "user",
+              parts: [{ text: GEBRUIKER_PROMPT(tekst_gekort, bestandsnaam) }],
+            },
+          ],
+          generationConfig: {
+            temperature: 0.1,
+            maxOutputTokens: 8192,
+            responseMimeType: "application/json",
+          },
+        }),
+      });
+
+      if (geminiRes.ok) {
+        const json = await geminiRes.json();
+        antwoord =
+          json?.candidates?.[0]?.content?.parts?.[0]?.text ?? "[]";
+        laatsteFout = null;
+        break;
+      }
+
+      const errText = await geminiRes.text();
+      laatsteFout = { message: errText, status: geminiRes.status };
+
+      if (geminiRes.status !== 429 && geminiRes.status !== 503) {
+        console.error(`Gemini extract-fout (${geminiRes.status}):`, errText);
+        return NextResponse.json(
+          {
+            error: `Gemini API-fout (${geminiRes.status})`,
+            detail: errText.substring(0, 400),
+          },
+          { status: geminiRes.status === 401 ? 401 : 500 }
+        );
+      }
+
+      if (poging === MAX_POGINGEN) break;
+
+      let wachtMs = 5000 * poging;
+      const retryMatch = errText.match(/"retryDelay"\s*:\s*"(\d+)s"/);
+      if (retryMatch) {
+        wachtMs = parseInt(retryMatch[1], 10) * 1000 + 500;
+      }
+      const veiligeWacht = Math.min(wachtMs, 45_000);
+      console.log(
+        `verwerk-pdf rate-limited, poging ${poging}/${MAX_POGINGEN}, wacht ${veiligeWacht}ms`
+      );
+      await new Promise((r) => setTimeout(r, veiligeWacht));
+    }
+
+    if (laatsteFout) {
+      return NextResponse.json(
+        {
+          error: "Gemini rate-limit bereikt na alle retries.",
+          gemini_message: laatsteFout.message?.substring(0, 500) ?? null,
+          gemini_status: laatsteFout.status ?? null,
+        },
+        { status: 429 }
+      );
+    }
 
     // ── JSON parsen ─────────────────────────────────────────────────────
     let opdrachten: {
@@ -145,7 +215,8 @@ export async function POST(req: NextRequest) {
           zinnen: op.zinnen ?? [],
           extra: {
             kleuren: op.kleuren ?? [],
-            subtype: op.subtype ?? (op.type === "markeer" ? "markeer" : "kleur_zinnen"),
+            subtype:
+              op.subtype ?? (op.type === "markeer" ? "markeer" : "kleur_zinnen"),
             bron: op.bron ?? null,
             vraag_d: op.vraag_d ?? null,
           },

@@ -15,8 +15,8 @@ type UploadStatus =
 const STATUS_TEKST: Record<UploadStatus, string> = {
   idle:       "PDF verwerken",
   rendering:  "🖼️ PDF-pagina's renderen...",
-  ocr:        "👁️ Groq Vision leest de pagina's...",
-  extracting: "🤖 Groq AI zoekt markeer/kleur-opdrachten...",
+  ocr:        "👁️ Gemini Vision leest de pagina's...",
+  extracting: "🤖 Gemini AI zoekt markeer/kleur-opdrachten...",
   sending:    "💾 Opslaan in Supabase...",
   done:       "✅ Klaar!",
   error:      "❌ Fout opgetreden",
@@ -69,7 +69,7 @@ export default function BeheerPage() {
     return canvas.toDataURL("image/jpeg", 0.8);
   }
 
-  // ── OCR van één pagina via /api/ocr-pagina (Groq Vision) ────────────────────
+  // ── OCR van één pagina via /api/ocr-pagina (Gemini Vision) ──────────────────
   async function ocrPagina(image: string, paginaNum: number): Promise<string> {
     const MAX_POGINGEN = 5;
     for (let poging = 1; poging <= MAX_POGINGEN; poging++) {
@@ -87,22 +87,22 @@ export default function BeheerPage() {
       // 429 = rate-limit → log details en wacht
       if (res.status === 429 && poging < MAX_POGINGEN) {
         const body = await res.text();
-        let detail: { groq_message?: string; groq_code?: string } = {};
+        let detail: { gemini_message?: string; gemini_status?: number; tip?: string } = {};
         try {
           detail = JSON.parse(body);
         } catch {
           /* niet-JSON */
         }
         console.warn(
-          `[OCR p${paginaNum}] Groq 429:`,
-          detail.groq_code ?? "",
-          detail.groq_message ?? body.substring(0, 300)
+          `[OCR p${paginaNum}] Gemini 429:`,
+          detail.gemini_status ?? "",
+          detail.gemini_message ?? body.substring(0, 300)
         );
 
         const wachtSec = 30 * poging; // 30s, 60s, 90s, 120s
         for (let s = wachtSec; s > 0; s--) {
           setVoortgang(
-            `Pagina ${paginaNum}: ${detail.groq_code ?? "rate_limit"} — wacht nog ${s}s (poging ${poging}/${MAX_POGINGEN - 1})...`
+            `Pagina ${paginaNum}: rate-limit — wacht nog ${s}s (poging ${poging}/${MAX_POGINGEN - 1})...`
           );
           await new Promise((r) => setTimeout(r, 1000));
         }
@@ -124,9 +124,9 @@ export default function BeheerPage() {
     const pdf = await pdfjs.getDocument({ data: buffer }).promise;
 
     let volledigeTekst = "";
-    // Proactieve wachttijd tussen pagina's om binnen Groq's TPM-limiet te blijven.
-    // Gratis tier vision ~30k TPM; bij ~1500 tokens/pagina = ~20 pagina's/min veilig
-    const WACHT_TUSSEN_PAGINAS_MS = 2500;
+    // Proactieve wachttijd tussen pagina's om binnen Gemini Flash Lite's RPM-limiet te blijven.
+    // Gratis tier ~15 RPM (= 1 request per 4s). 4500ms geeft veilige marge.
+    const WACHT_TUSSEN_PAGINAS_MS = 4500;
 
     for (let i = 1; i <= pdf.numPages; i++) {
       setStatus("rendering");
@@ -135,7 +135,7 @@ export default function BeheerPage() {
       const image = await renderPaginaAlsImage(pagina);
 
       setStatus("ocr");
-      setVoortgang(`Pagina ${i} van ${pdf.numPages} via Groq Vision lezen...`);
+      setVoortgang(`Pagina ${i} van ${pdf.numPages} via Gemini Vision lezen...`);
       const tekst = await ocrPagina(image, i);
 
       volledigeTekst += `\n\n=== Pagina ${i} ===\n${tekst}`;
@@ -201,7 +201,7 @@ export default function BeheerPage() {
           <div>
             <h1 className="text-3xl font-extrabold text-gray-800">🎓 Beheer – Juf / Meester</h1>
             <p className="text-gray-500 text-sm mt-1">
-              Upload de PDF. De tekst wordt in je browser gelezen, daarna haalt Groq AI de
+              Upload de PDF. De tekst wordt in je browser gelezen, daarna haalt Gemini AI de
               markeer/kleur-opdrachten eruit.
             </p>
           </div>
