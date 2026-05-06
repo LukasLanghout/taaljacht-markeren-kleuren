@@ -148,6 +148,62 @@ export default function BeheerPage() {
     return volledigeTekst;
   }
 
+  // ── Splits OCR-tekst op pagina-grenzen in chunks van max ~10k tekens ────
+  function chunkOcrTekst(tekst: string, maxLen = 10000): string[] {
+    const stukken = tekst.split(/(?=\n*=== Pagina \d+ ===)/);
+    const chunks: string[] = [];
+    let huidig = "";
+    for (const stuk of stukken) {
+      if ((huidig + stuk).length > maxLen && huidig.length > 0) {
+        chunks.push(huidig);
+        huidig = stuk;
+      } else {
+        huidig += stuk;
+      }
+    }
+    if (huidig.trim().length > 0) chunks.push(huidig);
+    return chunks.length === 0 ? [tekst] : chunks;
+  }
+
+  // ── Eén chunk extraheren via /api/verwerk-pdf met client-side retry ─────
+  async function verwerkChunk(
+    chunkTekst: string,
+    bestandsnaam: string,
+    deelInfo: string
+  ): Promise<{ gevonden: number; opgeslagen: number; opdrachten: Opdracht[] }> {
+    const MAX_POGINGEN = 4;
+    for (let poging = 1; poging <= MAX_POGINGEN; poging++) {
+      const res = await fetch("/api/verwerk-pdf", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tekst: chunkTekst, bestandsnaam, deelInfo }),
+      });
+
+      if (res.ok) return await res.json();
+
+      // 429 = wachten en opnieuw proberen
+      if (res.status === 429 && poging < MAX_POGINGEN) {
+        const body = await res.text();
+        let detail: { gemini_status?: number; gemini_message?: string } = {};
+        try { detail = JSON.parse(body); } catch { /* niet-JSON */ }
+        console.warn(`[verwerk ${deelInfo}] 429:`, detail.gemini_message?.substring(0, 200) ?? body.substring(0, 200));
+
+        const wachtSec = 30 * poging; // 30s, 60s, 90s
+        for (let s = wachtSec; s > 0; s--) {
+          setVoortgang(`${deelInfo}: rate-limit — wacht nog ${s}s (poging ${poging}/${MAX_POGINGEN - 1})...`);
+          await new Promise((r) => setTimeout(r, 1000));
+        }
+        continue;
+      }
+
+      const msg = await res.text();
+      let parsed: { error?: string };
+      try { parsed = JSON.parse(msg); } catch { parsed = { error: msg.substring(0, 200) }; }
+      throw new Error(`${deelInfo} mislukt: ${parsed.error ?? "Onbekende fout."}`);
+    }
+    throw new Error(`${deelInfo} blijvend gefaald (rate-limit).`);
+  }
+
   async function handleUpload(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     if (!bestand) return;
@@ -160,27 +216,36 @@ export default function BeheerPage() {
       const tekst = await extractPdfTekst(bestand);
       setVoortgang(`${tekst.length.toLocaleString("nl-NL")} tekens gelezen`);
 
-      // Stap 2: Alleen de tekst naar de server sturen
+      // Stap 2: tekst in chunks splitsen en sequentieel naar server sturen
       setStatus("extracting");
-      const res = await fetch("/api/verwerk-pdf", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          tekst,
-          bestandsnaam: bestand.name,
-        }),
-      });
+      const chunks = chunkOcrTekst(tekst, 10000);
+      const alleOpdrachten: Opdracht[] = [];
+      let totaalGevonden = 0;
+      let totaalOpgeslagen = 0;
 
-      if (!res.ok) {
-        const msg = await res.text();
-        let parsed;
-        try { parsed = JSON.parse(msg); } catch { parsed = { error: msg.substring(0, 200) }; }
-        throw new Error(parsed.error ?? "Onbekende fout.");
+      for (let i = 0; i < chunks.length; i++) {
+        const deelInfo = `Deel ${i + 1} van ${chunks.length}`;
+        setVoortgang(`${deelInfo}: opdrachten extraheren...`);
+        const result = await verwerkChunk(chunks[i], bestand.name, deelInfo);
+        totaalGevonden += result.gevonden ?? 0;
+        totaalOpgeslagen += result.opgeslagen ?? 0;
+        alleOpdrachten.push(...(result.opdrachten ?? []));
+
+        // 6s pauze tussen chunks om binnen Gemini Flash-Lite RPM (~15) te blijven
+        if (i < chunks.length - 1) {
+          for (let s = 6; s > 0; s--) {
+            setVoortgang(`${deelInfo} klaar (${result.gevonden} gevonden) — wacht ${s}s voor volgende deel...`);
+            await new Promise((r) => setTimeout(r, 1000));
+          }
+        }
       }
 
-      const json = await res.json();
       setStatus("done");
-      setResultaat(json);
+      setResultaat({
+        gevonden: totaalGevonden,
+        opgeslagen: totaalOpgeslagen,
+        opdrachten: alleOpdrachten,
+      });
       setVoortgang("");
       await laadOpdrachten();
       setBestand(null);
