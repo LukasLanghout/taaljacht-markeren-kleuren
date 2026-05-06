@@ -53,6 +53,34 @@ export default function BeheerPage() {
     setBestaandeOpdrachten((prev) => prev.filter((o) => o.id !== id));
   }
 
+  async function verwijderAlleOpdrachten() {
+    if (bestaandeOpdrachten.length === 0) return;
+    const aantal = bestaandeOpdrachten.length;
+    if (
+      !confirm(
+        `Weet je zeker dat je ALLE ${aantal} opdrachten wilt verwijderen? ` +
+          `Dit kan niet ongedaan worden gemaakt.`
+      )
+    )
+      return;
+    if (
+      !confirm(
+        `Echt zeker? Alle ${aantal} opdrachten worden permanent verwijderd.`
+      )
+    )
+      return;
+    // Supabase delete heeft een filter nodig — niet-leeg id volstaat
+    const { error } = await supabase
+      .from("opdrachten")
+      .delete()
+      .not("id", "is", null);
+    if (error) {
+      alert("Fout bij verwijderen: " + error.message);
+      return;
+    }
+    setBestaandeOpdrachten([]);
+  }
+
   // ── PDF pagina renderen naar JPEG (base64 data URL) ─────────────────────────
   async function renderPaginaAlsImage(
     pagina: import("pdfjs-dist").PDFPageProxy
@@ -347,9 +375,20 @@ export default function BeheerPage() {
 
         {/* Bestaande opdrachten */}
         <div className="bg-white rounded-2xl shadow p-6">
-          <h2 className="text-xl font-bold text-gray-800 mb-4">
-            📋 Opgeslagen opdrachten ({bestaandeOpdrachten.length})
-          </h2>
+          <div className="flex items-center justify-between mb-4 gap-3">
+            <h2 className="text-xl font-bold text-gray-800">
+              📋 Opgeslagen opdrachten ({bestaandeOpdrachten.length})
+            </h2>
+            {bestaandeOpdrachten.length > 0 && (
+              <button
+                onClick={verwijderAlleOpdrachten}
+                className="bg-red-500 hover:bg-red-600 text-white text-xs font-bold px-3 py-1.5 rounded-lg transition-colors"
+                title="Verwijder alle opdrachten"
+              >
+                🗑 Alles verwijderen
+              </button>
+            )}
+          </div>
 
           {bestaandeOpdrachten.length === 0 ? (
             <p className="text-gray-400 text-sm">Nog geen opdrachten. Upload een PDF om te beginnen.</p>
@@ -393,7 +432,23 @@ export default function BeheerPage() {
                       {new Date(op.aangemaakt_op).toLocaleDateString("nl-NL")}
                     </p>
                   </div>
-                  <div className="flex gap-2 shrink-0">
+                  <div className="flex gap-2 shrink-0 flex-wrap justify-end">
+                    {op.extra?.antwoorden && Object.keys(op.extra.antwoorden).length > 0 ? (
+                      <span className="bg-green-100 text-green-700 text-xs font-bold px-2 py-1.5 rounded-lg" title="Antwoorden ingevuld">
+                        ✓ Antwoord
+                      </span>
+                    ) : (
+                      <span className="bg-amber-100 text-amber-700 text-xs font-bold px-2 py-1.5 rounded-lg" title="Geen antwoorden ingevuld">
+                        ⚠ Geen antwoord
+                      </span>
+                    )}
+                    <a
+                      href={`/opdracht/${op.id}?modus=antwoord`}
+                      className="bg-blue-500 hover:bg-blue-600 text-white text-xs font-bold px-3 py-1.5 rounded-lg transition-colors"
+                      title="Antwoorden invullen"
+                    >
+                      ✏️ Antwoord
+                    </a>
                     <a
                       href={`/opdracht/${op.id}`}
                       className="bg-pink-500 hover:bg-pink-600 text-white text-xs font-bold px-3 py-1.5 rounded-lg transition-colors"

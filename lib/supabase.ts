@@ -39,6 +39,14 @@ export type OpdrachtSubtype =
   | "kleur_woord_rij"
   | "kleur_woord_plaatje";
 
+/**
+ * Correcte antwoorden voor een opdracht.
+ * - kleur_zinnen:        { "z0": "geel", "z1": "blauw", ... }
+ * - markeer:             { "z5": true }
+ * - kleur_woord_*:       { "z0": true, "z2": true } (welke woorden gekleurd moeten zijn)
+ */
+export type Antwoorden = Record<string, string | boolean>;
+
 export type Opdracht = {
   id: string;
   pdf_naam: string;
@@ -52,6 +60,10 @@ export type Opdracht = {
     subtype?: OpdrachtSubtype;
     bron?: string | null;
     aantal_per_groep?: number | null;
+    /** Correcte antwoorden uit het antwoordenboek (door juf ingevuld of AI-extractie). */
+    antwoorden?: Antwoorden;
+    /** Bij vraag_d: welke kleur is het juiste antwoord (bv. "groen" als die niet gebruikt is). */
+    vraag_d_antwoord?: string | null;
   };
   aangemaakt_op: string;
 };
