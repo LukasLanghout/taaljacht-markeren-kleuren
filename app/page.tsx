@@ -11,17 +11,33 @@ type LeerlingAntwoord = {
   opgeslagen_op: string;
 };
 
+type AiStatus = "laden" | "ok" | "bezig" | "error";
+
 export default function Home() {
   const [naam, setNaam] = useState("");
   const [opgeslagen, setOpgeslagen] = useState(false);
   const [opdrachten, setOpdrachten] = useState<Opdracht[]>([]);
   const [mijnAntwoorden, setMijnAntwoorden] = useState<LeerlingAntwoord[]>([]);
   const [ladenOpdrachten, setLadenOpdrachten] = useState(true);
+  const [aiStatus, setAiStatus] = useState<AiStatus>("laden");
+  const [aiReden, setAiReden] = useState("");
 
   // Naam herstellen
   useEffect(() => {
     const n = sessionStorage.getItem("leerling_naam");
     if (n) { setNaam(n); setOpgeslagen(true); }
+  }, []);
+
+  // AI-status ophalen
+  useEffect(() => {
+    fetch("/api/health")
+      .then((r) => r.json())
+      .then((data: { status: string; reden?: string }) => {
+        if (data.status === "ok") setAiStatus("ok");
+        else if (data.status === "laden") { setAiStatus("bezig"); setAiReden(data.reden ?? ""); }
+        else { setAiStatus("error"); setAiReden(data.reden ?? ""); }
+      })
+      .catch(() => { setAiStatus("error"); setAiReden("Verbinding mislukt"); });
   }, []);
 
   // Opdrachten laden
@@ -163,6 +179,34 @@ export default function Home() {
             Groep 5 · Blok 7 ·{" "}
             <span className="text-pink-500">Markeren &amp; Kleuren</span>
           </p>
+          {/* AI-status indicator */}
+          <div className="mt-3 inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-semibold border
+            ${aiStatus === 'ok'
+              ? 'bg-green-50 border-green-300 text-green-700'
+              : aiStatus === 'bezig'
+              ? 'bg-yellow-50 border-yellow-300 text-yellow-700'
+              : aiStatus === 'laden'
+              ? 'bg-gray-50 border-gray-300 text-gray-500'
+              : 'bg-red-50 border-red-300 text-red-700'}"
+            style={{
+              background: aiStatus === 'ok' ? '#f0fdf4' : aiStatus === 'bezig' ? '#fefce8' : aiStatus === 'laden' ? '#f9fafb' : '#fef2f2',
+              borderColor: aiStatus === 'ok' ? '#86efac' : aiStatus === 'bezig' ? '#fde047' : aiStatus === 'laden' ? '#d1d5db' : '#fca5a5',
+              color: aiStatus === 'ok' ? '#15803d' : aiStatus === 'bezig' ? '#a16207' : aiStatus === 'laden' ? '#6b7280' : '#b91c1c',
+            }}
+          >
+            <span>
+              {aiStatus === "ok" ? "🟢" : aiStatus === "bezig" ? "🟡" : aiStatus === "laden" ? "⚪" : "🔴"}
+            </span>
+            <span>
+              {aiStatus === "ok"
+                ? "AI verbonden"
+                : aiStatus === "bezig"
+                ? `AI laadt${aiReden ? ` — ${aiReden}` : "..."}`
+                : aiStatus === "laden"
+                ? "AI status controleren..."
+                : `AI niet beschikbaar${aiReden ? ` — ${aiReden}` : ""}`}
+            </span>
+          </div>
         </div>
 
         {/* Naam-invoer */}

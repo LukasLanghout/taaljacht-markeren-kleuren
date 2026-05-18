@@ -4,7 +4,8 @@ import { getSupabase } from "@/lib/supabase";
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
-const MODEL = "gemini-2.5-flash-lite";
+const MODEL = "mistralai/Mistral-7B-Instruct-v0.2";
+const HF_URL = "https://api-inference.huggingface.co/v1/chat/completions";
 
 const SYSTEEM_PROMPT = `
 Je bent een Nederlandse leerkracht die de juiste antwoorden bepaalt voor een
@@ -20,11 +21,10 @@ Bepaal voor elke zin het juiste antwoord:
     - "midden" = de inhoud/vragen/verhaal                                    → kleur 2 (vaak blauw)
     - "slot"   = afsluiting + groet (Kijk eens aan! ... Groet, naam)         → kleur 3 (vaak groen)
     Geef voor elke zin de juiste kleur uit de beschikbare-kleuren-lijst.
-    Zinnen die niet gekleurd hoeven kun je weglaten of "" geven.
 
 (B) Subtype "markeer":
     Welke zin(nen) bevatten het antwoord op de vraag uit de instructie?
-    Markeer alleen die met true. Andere zinnen niet opnemen of false geven.
+    Markeer alleen die met true.
 
 (C) Subtype "kleur_woord_zin":
     Per groep zinnen (gegroepeerd op "context") staan 2-3 woordopties.
@@ -33,15 +33,13 @@ Bepaal voor elke zin het juiste antwoord:
 
 (D) Subtype "kleur_woord_rij":
     Per context-groep staan 4-6 woordopties.
-    Markeer per groep precies "aantal_per_groep" woorden die het beste passen
-    bij de context (vaak synoniemen of bijbehorende uitleg). Markeer met true.
+    Markeer per groep precies "aantal_per_groep" woorden met true.
 
 (E) Subtype "kleur_woord_plaatje":
-    Per context-groep (een plaatje) staan meerdere woorden.
+    Per context-groep staan meerdere woorden.
     Markeer "aantal_per_groep" woorden die bij het plaatje horen met true.
 
-Bij "vraag_d" (welke kleur heb je niet gebruikt): bepaal welke kleur niet
-voorkomt in je antwoorden voor de hoofdopdracht.
+Bij "vraag_d": bepaal welke kleur niet voorkomt in je antwoorden.
 
 Geef het resultaat als geldige JSON. Geen uitleg, geen markdown.
 `.trim();
@@ -58,14 +56,14 @@ const GEBRUIKER_PROMPT = (op: {
 Les: ${op.les}
 Instructie: ${op.instructie}
 Subtype: ${op.subtype}
-Beschikbare kleuren: ${op.kleuren.length > 0 ? op.kleuren.join(", ") : "(geen specifieke kleur — gewoon highlight)"}
+Beschikbare kleuren: ${op.kleuren.length > 0 ? op.kleuren.join(", ") : "(geen — gewoon highlight)"}
 Aantal per groep: ${op.aantal_per_groep ?? "n.v.t."}
 Vraag d: ${op.vraag_d ?? "(geen)"}
 
 Zinnen:
 ${op.zinnen.map((z) => `- ${z.id}: "${z.tekst}"${z.context ? `  [context: ${z.context}]` : ""}`).join("\n")}
 
-Geef het antwoord exact in dit JSON-formaat:
+Geef het antwoord exact in dit JSON-formaat (ALLEEN JSON, geen uitleg):
 {
   "antwoorden": {
     "z0": "geel",
@@ -75,11 +73,66 @@ Geef het antwoord exact in dit JSON-formaat:
   "vraag_d_antwoord": "groen"
 }
 
-- Voor kleur_zinnen: gebruik de kleur-string als waarde, of "" voor "niet kleuren".
-- Voor markeer/kleur_woord_*: gebruik true voor "moet gekleurd/gemarkeerd worden".
-- Laat zinnen die niet gekleurd hoeven gewoon weg of geef "".
-- "vraag_d_antwoord" alleen invullen als er een vraag d is, anders weglaten of null.
+- Voor kleur_zinnen: gebruik de kleur-string als waarde, of "" voor niet kleuren.
+- Voor markeer/kleur_woord_*: gebruik true voor moet gekleurd worden.
+- "vraag_d_antwoord" alleen invullen als er een vraag d is, anders null.
 `.trim();
+
+async function callHF(
+  apiKey: string,
+  systemPrompt: string,
+  userPrompt: string
+): Promise<{ ok: true; content: string } | { ok: false; status: number; message: string }> {
+  const MAX_POGINGEN = 3;
+
+  for (let poging = 1; poging <= MAX_POGINGEN; poging++) {
+    const res = await fetch(HF_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: MODEL,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt },
+        ],
+        max_tokens: 4096,
+        temperature: 0.1,
+      }),
+    });
+
+    if (res.ok) {
+      const json = await res.json();
+      const content: string = json?.choices?.[0]?.message?.content ?? "{}";
+      return { ok: true, content };
+    }
+
+    const errText = await res.text();
+
+    if (res.status === 503) {
+      if (poging === MAX_POGINGEN) break;
+      let wachtMs = 20_000;
+      try {
+        const errJson = JSON.parse(errText);
+        if (errJson.estimated_time) wachtMs = Math.min(errJson.estimated_time * 1000 + 1000, 40_000);
+      } catch { /* niet-JSON */ }
+      await new Promise((r) => setTimeout(r, wachtMs));
+      continue;
+    }
+
+    if (res.status === 429) {
+      if (poging === MAX_POGINGEN) break;
+      await new Promise((r) => setTimeout(r, 15_000 * poging));
+      continue;
+    }
+
+    return { ok: false, status: res.status, message: errText.substring(0, 400) };
+  }
+
+  return { ok: false, status: 503, message: "HF model niet bereikbaar na alle pogingen." };
+}
 
 export async function POST(req: NextRequest) {
   try {
@@ -89,17 +142,13 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "id ontbreekt" }, { status: 400 });
     }
 
-    const apiKey = process.env.GEMINI_API_KEY;
+    const apiKey = process.env.HUGGINGFACE_API_KEY;
     if (!apiKey) {
-      return NextResponse.json(
-        { error: "GEMINI_API_KEY ontbreekt." },
-        { status: 500 }
-      );
+      return NextResponse.json({ error: "HUGGINGFACE_API_KEY ontbreekt." }, { status: 500 });
     }
 
     const supabase = getSupabase();
 
-    // ── Opdracht ophalen ────────────────────────────────────────────────
     const { data: opdracht, error: ophaalErr } = await supabase
       .from("opdrachten")
       .select("*")
@@ -130,95 +179,40 @@ export async function POST(req: NextRequest) {
       zinnen: opdracht.zinnen,
     };
 
-    // ── Gemini-call met retry ───────────────────────────────────────────
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${apiKey}`;
-    const MAX_POGINGEN = 3;
-    let laatsteFout: { message: string; status: number } | null = null;
-    let resultaat: { antwoorden?: Record<string, string | boolean>; vraag_d_antwoord?: string | null } | null = null;
+    const resultaat = await callHF(apiKey, SYSTEEM_PROMPT, GEBRUIKER_PROMPT(opData));
 
-    for (let poging = 1; poging <= MAX_POGINGEN; poging++) {
-      const res = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          systemInstruction: { parts: [{ text: SYSTEEM_PROMPT }] },
-          contents: [
-            { role: "user", parts: [{ text: GEBRUIKER_PROMPT(opData) }] },
-          ],
-          generationConfig: {
-            temperature: 0.1,
-            maxOutputTokens: 4096,
-            responseMimeType: "application/json",
-          },
-        }),
-      });
-
-      if (res.ok) {
-        const json = await res.json();
-        const tekst: string = json?.candidates?.[0]?.content?.parts?.[0]?.text ?? "{}";
-        try {
-          const schoon = tekst.replace(/```json\s*/gi, "").replace(/```\s*/g, "").trim();
-          resultaat = JSON.parse(schoon);
-          if (typeof resultaat !== "object" || resultaat === null) throw new Error();
-          break;
-        } catch {
-          return NextResponse.json(
-            { error: "AI gaf ongeldige JSON", ai_antwoord: tekst.substring(0, 400) },
-            { status: 500 }
-          );
-        }
-      }
-
-      const errText = await res.text();
-      laatsteFout = { message: errText, status: res.status };
-
-      if (res.status !== 429 && res.status !== 503) {
-        // Specifieke melding bij gelekte API-key
-        const isLeaked = /leaked|API key.*reported/i.test(errText);
-        const isPermDenied = res.status === 403;
-        let userMsg = `Gemini API-fout (${res.status})`;
-        if (isLeaked) {
-          userMsg =
-            "Gemini API-key is door Google als gelekt gemarkeerd. " +
-            "Maak een nieuwe key aan op https://aistudio.google.com/apikey " +
-            "en zet die in Vercel env-vars (GEMINI_API_KEY).";
-        } else if (isPermDenied) {
-          userMsg = "Gemini permission denied (403). Check API-key in Vercel env-vars.";
-        } else if (res.status === 401) {
-          userMsg = "Gemini API-key ongeldig (401). Check Vercel env-vars.";
-        }
-        console.error(`Gemini fout (${res.status}):`, errText.substring(0, 300));
-        return NextResponse.json(
-          { error: userMsg, detail: errText.substring(0, 400) },
-          { status: res.status }
-        );
-      }
-
-      if (poging === MAX_POGINGEN) break;
-
-      let wachtMs = 5000 * poging;
-      const retryMatch = errText.match(/"retryDelay"\s*:\s*"(\d+)s"/);
-      if (retryMatch) wachtMs = Math.min(parseInt(retryMatch[1], 10) * 1000 + 500, 15_000);
-      await new Promise((r) => setTimeout(r, wachtMs));
+    if (!resultaat.ok) {
+      let userMsg = `HuggingFace API-fout (${resultaat.status})`;
+      if (resultaat.status === 401) userMsg = "HuggingFace API-key ongeldig. Check HUGGINGFACE_API_KEY in Vercel env-vars.";
+      if (resultaat.status === 503) userMsg = "HuggingFace model laadt. Probeer over 30s opnieuw.";
+      return NextResponse.json({ error: userMsg, detail: resultaat.message }, { status: resultaat.status });
     }
 
-    if (!resultaat) {
+    // JSON parsen
+    let parsed: { antwoorden?: Record<string, string | boolean>; vraag_d_antwoord?: string | null } | null = null;
+    try {
+      const schoon = resultaat.content
+        .replace(/```json\s*/gi, "")
+        .replace(/```\s*/g, "")
+        .trim();
+      // Zoek het JSON object in de tekst
+      const objMatch = schoon.match(/\{[\s\S]*\}/);
+      const toParse = objMatch ? objMatch[0] : schoon;
+      parsed = JSON.parse(toParse);
+      if (typeof parsed !== "object" || parsed === null) throw new Error();
+    } catch {
       return NextResponse.json(
-        {
-          error: "Gemini rate-limit (server-retry uitgeput).",
-          gemini_message: laatsteFout?.message?.substring(0, 400),
-          gemini_status: laatsteFout?.status,
-        },
-        { status: 429 }
+        { error: "AI gaf ongeldige JSON", ai_antwoord: resultaat.content.substring(0, 400) },
+        { status: 500 }
       );
     }
 
-    // ── Schoonmaken: alleen geldige zin-id's, lege waarden eruit ────────
+    // Schoonmaken
     const geldigeIds = new Set<string>(
       (opdracht.zinnen as { id: string }[]).map((z) => z.id)
     );
     const antwoordenSchoon: Record<string, string | boolean> = {};
-    for (const [zinId, waarde] of Object.entries(resultaat.antwoorden ?? {})) {
+    for (const [zinId, waarde] of Object.entries(parsed.antwoorden ?? {})) {
       if (!geldigeIds.has(zinId)) continue;
       if (waarde === "" || waarde === false || waarde === null) continue;
       antwoordenSchoon[zinId] = waarde as string | boolean;
@@ -227,7 +221,7 @@ export async function POST(req: NextRequest) {
     const nieuweExtra = {
       ...opdracht.extra,
       antwoorden: antwoordenSchoon,
-      vraag_d_antwoord: resultaat.vraag_d_antwoord ?? null,
+      vraag_d_antwoord: parsed.vraag_d_antwoord ?? null,
     };
 
     const { error: updateErr } = await supabase
@@ -248,7 +242,7 @@ export async function POST(req: NextRequest) {
       les: opdracht.les,
       aantal_antwoorden: Object.keys(antwoordenSchoon).length,
       antwoorden: antwoordenSchoon,
-      vraag_d_antwoord: resultaat.vraag_d_antwoord ?? null,
+      vraag_d_antwoord: parsed.vraag_d_antwoord ?? null,
     });
   } catch (err) {
     console.error("genereer-antwoorden fout:", err);

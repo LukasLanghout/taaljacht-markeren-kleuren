@@ -4,7 +4,8 @@ import { getSupabase } from "@/lib/supabase";
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
-const MODEL = "gemini-2.5-flash-lite";
+const MODEL = "mistralai/Mistral-7B-Instruct-v0.2";
+const HF_URL = "https://api-inference.huggingface.co/v1/chat/completions";
 
 const SYSTEEM_PROMPT = `
 Je bent een assistent die opdrachten extraheert uit Nederlandse basisschoolboeken
@@ -39,15 +40,11 @@ Er zijn vijf subtypes — gebruik exact deze waardes voor "subtype":
 (D) "kleur_woord_rij"
     Per rij staan 4-6 woorden; de leerling kleurt 2 (of meer) woorden in elke rij die bij een
     bepaald begrip horen.
-    Voorbeelden:
-      - "Welke woorden hebben met elkaar te maken? Kleur in elke rij twee woorden."
-      - "Wat hoort bij het vetgedrukte woord? Kleur in elke rij twee woorden."
     → context = de aanduiding/het kop-woord van die rij (bv. "rij 1: bij groot")
     → kleuren: []
 
 (E) "kleur_woord_plaatje"
     Bij een plaatje staan meerdere woorden; de leerling kleurt de woorden die bij het plaatje passen.
-    Voorbeeld: "Drie woorden passen bij het plaatje. Kleur die woorden."
     → context = beschrijving van het plaatje
     → kleuren: []
 
@@ -81,7 +78,7 @@ Geef een JSON array met opdrachten in precies dit formaat:
 ]
 
 Velden:
-- "les": "Les 5", "Les 6", "Taak 2", "Tussenstand Les 7-8-9", enz. — pak het op uit de paginakop.
+- "les": "Les 5", "Les 6", "Taak 2", "Tussenstand Les 7-8-9", enz.
 - "type": "kleur" of "markeer".
 - "subtype": "kleur_zinnen" | "markeer" | "kleur_woord_zin" | "kleur_woord_rij" | "kleur_woord_plaatje".
 - "instructie": de letterlijke opdrachttekst.
@@ -92,11 +89,12 @@ Velden:
 - "aantal_per_groep": hoeveel woorden de leerling per context-groep moet kleuren (1, 2 of 3).
 
 BELANGRIJK:
-- Als de brontekst op een ANDERE pagina staat dan de opdracht, zoek die pagina op en haal
-  daar de zinnen vandaan.
+- Als de brontekst op een ANDERE pagina staat dan de opdracht, zoek die pagina op.
 - Bij "kleur_zinnen": neem de brontekst zin-voor-zin op, niet samengevat.
 - Eén pagina kan meerdere opdrachten bevatten.
-- Geef bij geen opdrachten een lege array: [].
+- Geef bij geen opdrachten een lege array: []
+
+Geef ALLEEN de JSON array, geen uitleg, geen markdown.
 `.trim();
 
 type ExtractOp = {
@@ -116,127 +114,123 @@ type ExtractOp = {
   aantal_per_groep?: number;
 };
 
-/**
- * Verwerk één chunk OCR-tekst:
- * Input:  { tekst: string, bestandsnaam: string, deelInfo?: string }
- * Output: { gevonden, opgeslagen, opdrachten }
- *
- * De client splitst de OCR-tekst in chunks en roept dit endpoint per chunk aan.
- * Zo blijft elke call ruim onder Vercel's 60s function-timeout.
- */
+async function callHF(
+  apiKey: string,
+  systemPrompt: string,
+  userPrompt: string,
+  maxTokens = 8192
+): Promise<{ ok: true; content: string } | { ok: false; status: number; message: string }> {
+  const MAX_POGINGEN = 4;
+
+  for (let poging = 1; poging <= MAX_POGINGEN; poging++) {
+    const res = await fetch(HF_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: MODEL,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt },
+        ],
+        max_tokens: maxTokens,
+        temperature: 0.1,
+      }),
+    });
+
+    if (res.ok) {
+      const json = await res.json();
+      const content: string = json?.choices?.[0]?.message?.content ?? "[]";
+      return { ok: true, content };
+    }
+
+    const errText = await res.text();
+
+    // Model laden (503) → wachten op estimated_time
+    if (res.status === 503) {
+      if (poging === MAX_POGINGEN) break;
+      let wachtMs = 20_000;
+      try {
+        const errJson = JSON.parse(errText);
+        if (errJson.estimated_time) wachtMs = Math.min(errJson.estimated_time * 1000 + 1000, 45_000);
+      } catch { /* niet-JSON */ }
+      console.log(`HF model laadt (${deelInfoLog}), wacht ${wachtMs}ms`);
+      await new Promise((r) => setTimeout(r, wachtMs));
+      continue;
+    }
+
+    // Rate-limit (429) → korte wacht
+    if (res.status === 429) {
+      if (poging === MAX_POGINGEN) break;
+      const wachtMs = 15_000 * poging;
+      console.log(`HF rate-limit, wacht ${wachtMs}ms`);
+      await new Promise((r) => setTimeout(r, wachtMs));
+      continue;
+    }
+
+    // Niet-retryable
+    return { ok: false, status: res.status, message: errText.substring(0, 400) };
+  }
+
+  return { ok: false, status: 503, message: "HF model niet bereikbaar na alle pogingen." };
+}
+
+// Hulpvariabele voor logging (wordt overschreven per call)
+let deelInfoLog = "";
+
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const tekst: string = body.tekst ?? "";
     const bestandsnaam: string = body.bestandsnaam ?? "onbekend.pdf";
     const deelInfo: string = body.deelInfo ?? "deel 1 van 1";
+    deelInfoLog = deelInfo;
 
     if (!tekst || tekst.trim().length < 30) {
       return NextResponse.json({ gevonden: 0, opgeslagen: 0, opdrachten: [] });
     }
 
-    const apiKey = process.env.GEMINI_API_KEY;
+    const apiKey = process.env.HUGGINGFACE_API_KEY;
     if (!apiKey) {
       return NextResponse.json(
-        { error: "GEMINI_API_KEY ontbreekt in environment variables." },
+        { error: "HUGGINGFACE_API_KEY ontbreekt in environment variables." },
         { status: 500 }
       );
     }
 
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${apiKey}`;
-    const MAX_POGINGEN = 3;
-    let laatsteFout: { message: string; status: number } | null = null;
+    const resultaat = await callHF(apiKey, SYSTEEM_PROMPT, GEBRUIKER_PROMPT(tekst, bestandsnaam, deelInfo));
+
+    if (!resultaat.ok) {
+      let userMsg = `HuggingFace API-fout (${resultaat.status})`;
+      if (resultaat.status === 401) userMsg = "HuggingFace API-key ongeldig. Check HUGGINGFACE_API_KEY in Vercel env-vars.";
+      if (resultaat.status === 403) userMsg = "HuggingFace toegang geweigerd. Check HUGGINGFACE_API_KEY.";
+      if (resultaat.status === 503) userMsg = "HuggingFace model laadt nog of is niet beschikbaar. Probeer opnieuw.";
+      return NextResponse.json({ error: userMsg, detail: resultaat.message }, { status: resultaat.status });
+    }
+
+    // JSON parsen uit de AI response
     let opdrachten: ExtractOp[] = [];
-
-    for (let poging = 1; poging <= MAX_POGINGEN; poging++) {
-      const res = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          systemInstruction: { parts: [{ text: SYSTEEM_PROMPT }] },
-          contents: [
-            {
-              role: "user",
-              parts: [{ text: GEBRUIKER_PROMPT(tekst, bestandsnaam, deelInfo) }],
-            },
-          ],
-          generationConfig: {
-            temperature: 0.1,
-            maxOutputTokens: 8192,
-            responseMimeType: "application/json",
-          },
-        }),
-      });
-
-      if (res.ok) {
-        const json = await res.json();
-        const antwoord: string =
-          json?.candidates?.[0]?.content?.parts?.[0]?.text ?? "[]";
-        try {
-          const schoon = antwoord.replace(/```json\s*/gi, "").replace(/```\s*/g, "").trim();
-          const parsed = JSON.parse(schoon);
-          if (!Array.isArray(parsed)) throw new Error("Geen array");
-          opdrachten = parsed as ExtractOp[];
-          laatsteFout = null;
-          break;
-        } catch {
-          return NextResponse.json(
-            { error: "AI gaf ongeldige JSON.", ai_antwoord: antwoord.substring(0, 500) },
-            { status: 500 }
-          );
-        }
-      }
-
-      const errText = await res.text();
-      laatsteFout = { message: errText, status: res.status };
-
-      // Niet-retryable
-      if (res.status !== 429 && res.status !== 503) {
-        const isLeaked = /leaked|API key.*reported/i.test(errText);
-        let userMsg = `Gemini API-fout (${res.status})`;
-        if (isLeaked) {
-          userMsg =
-            "Gemini API-key is door Google als gelekt gemarkeerd. " +
-            "Maak een nieuwe key aan op https://aistudio.google.com/apikey " +
-            "en zet die in Vercel env-vars (GEMINI_API_KEY).";
-        } else if (res.status === 403) {
-          userMsg = "Gemini permission denied (403). Check API-key in Vercel env-vars.";
-        } else if (res.status === 401) {
-          userMsg = "Gemini API-key ongeldig (401). Check Vercel env-vars.";
-        }
-        console.error(`Gemini extract-fout (${res.status}):`, errText.substring(0, 300));
-        return NextResponse.json(
-          { error: userMsg, detail: errText.substring(0, 400) },
-          { status: res.status }
-        );
-      }
-
-      if (poging === MAX_POGINGEN) break;
-
-      // Korte server-side retry: max 15s totaal blijft veilig binnen 60s.
-      let wachtMs = 5000 * poging;
-      const retryMatch = errText.match(/"retryDelay"\s*:\s*"(\d+)s"/);
-      if (retryMatch) {
-        wachtMs = Math.min(parseInt(retryMatch[1], 10) * 1000 + 500, 15_000);
-      }
-      console.log(
-        `verwerk-pdf rate-limited (${deelInfo}), poging ${poging}/${MAX_POGINGEN}, wacht ${wachtMs}ms`
-      );
-      await new Promise((r) => setTimeout(r, wachtMs));
-    }
-
-    if (laatsteFout) {
+    try {
+      const schoon = resultaat.content
+        .replace(/```json\s*/gi, "")
+        .replace(/```\s*/g, "")
+        .trim();
+      // Zoek de JSON array in de tekst (Mistral voegt soms tekst voor/na)
+      const arrayMatch = schoon.match(/\[[\s\S]*\]/);
+      const toParse = arrayMatch ? arrayMatch[0] : schoon;
+      const parsed = JSON.parse(toParse);
+      if (!Array.isArray(parsed)) throw new Error("Geen array");
+      opdrachten = parsed as ExtractOp[];
+    } catch {
       return NextResponse.json(
-        {
-          error: "Gemini rate-limit (server-retry uitgeput).",
-          gemini_message: laatsteFout.message?.substring(0, 500) ?? null,
-          gemini_status: laatsteFout.status,
-        },
-        { status: 429 }
+        { error: "AI gaf ongeldige JSON.", ai_antwoord: resultaat.content.substring(0, 500) },
+        { status: 500 }
       );
     }
 
-    // ── Opslaan in Supabase ─────────────────────────────────────────────
+    // ── Opslaan in Supabase ──────────────────────────────────────────────
     const supabase = getSupabase();
     const opgeslagen = [];
 
