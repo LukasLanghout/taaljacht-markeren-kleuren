@@ -15,7 +15,23 @@
       "mcp__Claude_Preview__preview_start",
       "Bash(npm install *)",
       "Bash(npm run *)",
-      "Bash(echo \"EXIT=$?\")"
+      "Bash(echo \"EXIT=$?\")",
+      "mcp__13f65052-9e86-42a9-8457-d88dc4dde0e7__get_project",
+      "mcp__13f65052-9e86-42a9-8457-d88dc4dde0e7__restore_project",
+      "PowerShell(git add app/api/ocr-pagina/route.ts app/api/verwerk-pdf/route.ts app/beheer/page.tsx package.json package-lock.json .env.local.example .env.local)",
+      "PowerShell(git push origin main 2>&1)",
+      "PowerShell(npm run build 2>&1)",
+      "PowerShell(git pull --rebase origin main 2>&1)",
+      "PowerShell(git commit -F .git/COMMIT_MSG_TMP.txt)",
+      "PowerShell(git stash push -m \"wip-settings\" -- .claude/settings.local.json; git pull --rebase origin main 2>&1 | Select-Object -Last 10; git push origin main 2>&1 | Select-Object -Last 5; git stash pop 2>&1 | Select-Object -Last 3)",
+      "PowerShell(git add app/api/verwerk-pdf/route.ts app/beheer/page.tsx)",
+      "mcp__13f65052-9e86-42a9-8457-d88dc4dde0e7__execute_sql",
+      "PowerShell(git add app/page.tsx app/opdracht/[id]/page.tsx app/beheer/page.tsx lib/supabase.ts; git commit -F .git/COMMIT_MSG_TMP.txt; git stash push -m \"settings\" -- .claude/settings.local.json 2>$null; git pull --rebase origin main 2>&1 | Select-Object -Last 5; git push origin main 2>&1 | Select-Object -Last 5; git stash pop 2>$null | Out-Null)",
+      "PowerShell(git add app/api/genereer-antwoorden/route.ts app/beheer/page.tsx)",
+      "PowerShell(git add app/api/genereer-antwoorden/route.ts app/api/ocr-pagina/route.ts app/api/verwerk-pdf/route.ts)",
+      "PowerShell(git commit -m \"Duidelijke foutmelding bij gelekte Gemini-key \\(403\\)\")",
+      "PowerShell(git add .env.local .claude/settings.local.json)",
+      "PowerShell(git commit -m \"Update lokale config en .env.local\")"
     ]
   }
 }
